@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Ruflo local secrets and runtime data
+.env
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Bundled 7-Zip binaries (see scripts/fetch-7z.ps1)
+src-tauri/resources/7z/*
+!src-tauri/resources/7z/.gitkeep
+
+# Local agent tooling (ruflo / claude)
+.claude/
+.claude-flow/
+.agents/
+.swarm/
+CLAUDE.md
+.mcp.json

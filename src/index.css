@@ -1,0 +1,79 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+}
+.dark {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+  overscroll-behavior: none;
+  user-select: none;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(161 161 170 / 0.45) transparent;
+}
+
+::selection {
+  background: rgb(99 102 241 / 0.3);
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex h-9 select-none items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-indigo-600 text-white hover:bg-indigo-500 active:bg-indigo-700;
+  }
+  .btn-soft {
+    @apply bg-zinc-200/70 text-zinc-800 hover:bg-zinc-200 dark:bg-zinc-800/70 dark:text-zinc-100 dark:hover:bg-zinc-800;
+  }
+  .btn-danger-soft {
+    @apply bg-red-500/10 text-red-600 hover:bg-red-500/20 dark:text-red-400;
+  }
+  .btn-ghost {
+    @apply text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-50;
+  }
+  .btn-icon {
+    @apply inline-flex h-8 w-8 select-none items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100;
+  }
+  .input {
+    @apply h-9 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-zinc-700 dark:bg-zinc-900;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-md bg-zinc-200/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300;
+  }
+  .seg {
+    @apply inline-flex items-center gap-0.5 rounded-lg bg-zinc-200/60 p-0.5 dark:bg-zinc-800/60;
+  }
+  .seg-item {
+    @apply inline-flex h-7 select-none items-center justify-center rounded-[7px] px-2.5 text-xs font-medium text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100;
+  }
+  .seg-item-active {
+    @apply bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50;
+  }
+  .card {
+    @apply rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900/70;
+  }
+}
