@@ -9,7 +9,7 @@ export interface ExtractOpts {
 }
 
 export interface CreateOpts {
-  format?: "zip" | "7z" | "tar";
+  format?: "zip" | "7z" | "tar" | "tar.gz";
   level?: number;
   password?: string;
   split?: string;

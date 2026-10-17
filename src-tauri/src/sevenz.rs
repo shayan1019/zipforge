@@ -1,7 +1,7 @@
 // sevenz.rs — 7-Zip engine wrapper: listing, extract, create, test + progress events
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +16,7 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct TaskHandle {
-    pub child: Child,
+    pub children: Vec<Child>,
     pub cancelled: AtomicBool,
 }
 
@@ -101,6 +101,44 @@ fn base_cmd(app: &AppHandle) -> Result<Command, String> {
     Ok(c)
 }
 
+// ---------- compressed tar (tar.gz / tgz / tar.bz2 / tar.xz / tar.zst) ----------
+
+const TAR_SUFFIXES: [&str; 8] = [
+    ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+];
+
+pub fn compressed_tar(path: &str) -> bool {
+    let n = path.to_ascii_lowercase();
+    TAR_SUFFIXES.iter().any(|s| n.ends_with(s))
+}
+
+fn tar_container_label(path: &str) -> &'static str {
+    let n = path.to_ascii_lowercase();
+    if n.ends_with(".tgz") || n.ends_with(".tar.gz") {
+        "tar.gz"
+    } else if n.ends_with(".tbz2") || n.ends_with(".tar.bz2") {
+        "tar.bz2"
+    } else if n.ends_with(".txz") || n.ends_with(".tar.xz") {
+        "tar.xz"
+    } else {
+        "tar.zst"
+    }
+}
+
+/// Outer decompressor: streams the inner .tar payload to stdout.
+fn decompress_cmd(app: &AppHandle, path: &str) -> Result<Command, String> {
+    let mut c = base_cmd(app)?;
+    c.arg("x").arg("-so").arg("-y").arg("--").arg(path);
+    Ok(c)
+}
+
+fn first_error_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| l.to_lowercase().contains("error"))
+        .map(str::to_string)
+}
+
 fn parse_size(s: &str) -> u64 {
     s.trim().parse().unwrap_or(0)
 }
@@ -122,7 +160,7 @@ fn parse_file(l: &str) -> Option<String> {
     let t = l.trim();
     if let Some(rest) = t.strip_prefix("Extracting") {
         let n = rest.trim();
-        if !n.is_empty() && !n.starts_with('%') {
+        if !n.is_empty() && !n.starts_with('%') && !n.starts_with("archive:") {
             return Some(n.to_string());
         }
     }
@@ -169,6 +207,9 @@ fn format_task_error(error_lines: &[String], code: Option<i32>) -> String {
 // ---------- list ----------
 
 pub fn list_archive(app: &AppHandle, path: &str, password: Option<&str>) -> Result<Listing, String> {
+    if compressed_tar(path) {
+        return list_compressed_tar(app, path);
+    }
     let mut c = base_cmd(app)?;
     c.arg("l")
         .arg("-slt")
@@ -273,89 +314,372 @@ fn parse_slt(path: &str, out: &str) -> Result<Listing, String> {
     Ok(Listing { info, entries })
 }
 
+/// Lists a compressed tar (tar.gz/tgz/...) by streaming the outer layer through
+/// `7z x -so` into `7z l -si -ttar -slt`, so the real file entries are shown.
+fn list_compressed_tar(app: &AppHandle, path: &str) -> Result<Listing, String> {
+    let errs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut outer = decompress_cmd(app, path)?;
+    let mut outer_child = outer
+        .spawn()
+        .map_err(|e| format!("7z çalıştırılamadı: {e}"))?;
+    let outer_out = outer_child
+        .stdout
+        .take()
+        .ok_or_else(|| "7z çıktısı alınamadı".to_string())?;
+    let outer_err_thread = outer_child
+        .stderr
+        .take()
+        .map(|e| spawn_stderr_reader(e, errs.clone()));
+
+    let mut inner = base_cmd(app)?;
+    inner
+        .arg("l")
+        .arg("-si")
+        .arg("-ttar")
+        .arg("-slt")
+        .arg("-sccUTF-8");
+    inner.stdin(Stdio::from(outer_out));
+    let res = inner.spawn().and_then(|ch| ch.wait_with_output());
+
+    let _ = outer_child.kill();
+    let _ = outer_child.wait();
+    if let Some(t) = outer_err_thread {
+        let _ = t.join();
+    }
+
+    let out = res.map_err(|e| format!("7z çalıştırılamadı: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        let inner_err = String::from_utf8_lossy(&out.stderr).to_string();
+        let collected = errs.lock().unwrap().join("\n");
+        let msg = first_error_line(&collected)
+            .or_else(|| first_error_line(&inner_err))
+            .or_else(|| first_error_line(&stdout))
+            .unwrap_or_else(|| "Arşiv açılamadı".to_string());
+        return Err(format!("Arşiv açılamadı: {msg}"));
+    }
+
+    let mut listing = parse_slt(path, &stdout)?;
+    listing.info.format = tar_container_label(path).to_string();
+    if let Ok(md) = std::fs::metadata(path) {
+        listing.info.physical_size = md.len();
+    }
+    listing.entries.retain(|e| {
+        let t = e.name.trim_matches(|c: char| c == '\\' || c == '/' || c == ' ');
+        !t.is_empty() && t != "."
+    });
+    listing.info.entries = listing.entries.len() as u64;
+    Ok(listing)
+}
+
 // ---------- task runner ----------
+
+enum StepKind {
+    Single(Command),
+    Piped(Command, Command),
+}
+
+struct Step {
+    kind: StepKind,
+    lo: u32,
+    hi: u32,
+}
+
+impl Step {
+    fn single(cmd: Command) -> Self {
+        Self {
+            kind: StepKind::Single(cmd),
+            lo: 0,
+            hi: 100,
+        }
+    }
+
+    fn covered(cmd: Command, lo: u32, hi: u32) -> Self {
+        Self {
+            kind: StepKind::Single(cmd),
+            lo,
+            hi,
+        }
+    }
+
+    fn piped(outer: Command, inner: Command) -> Self {
+        Self {
+            kind: StepKind::Piped(outer, inner),
+            lo: 0,
+            hi: 100,
+        }
+    }
+}
+
+fn is_cancelled(tasks: &Arc<Mutex<HashMap<u32, TaskHandle>>>, task_id: u32) -> bool {
+    tasks
+        .lock()
+        .unwrap()
+        .get(&task_id)
+        .map(|h| h.cancelled.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn register_children(tasks: &Arc<Mutex<HashMap<u32, TaskHandle>>>, task_id: u32, children: Vec<Child>) {
+    if let Some(h) = tasks.lock().unwrap().get_mut(&task_id) {
+        h.children = children;
+    }
+}
+
+fn take_children(tasks: &Arc<Mutex<HashMap<u32, TaskHandle>>>, task_id: u32) -> Vec<Child> {
+    if let Some(h) = tasks.lock().unwrap().get_mut(&task_id) {
+        std::mem::take(&mut h.children)
+    } else {
+        Vec::new()
+    }
+}
+
+fn spawn_stderr_reader<R: Read + Send + 'static>(
+    e: R,
+    errs: Arc<Mutex<Vec<String>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(e).lines().map_while(Result::ok) {
+            if !line.trim().is_empty() {
+                errs.lock().unwrap().push(line);
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_progress(
+    app: &AppHandle,
+    task_id: u32,
+    out: impl Read,
+    lo: u32,
+    hi: u32,
+    percent: &mut u32,
+    last_file: &mut Option<String>,
+    error_lines: &mut Vec<String>,
+) {
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        let l: String = line
+            .chars()
+            .filter(|c| *c != '\r' && *c != '\u{8}')
+            .collect();
+        if l.contains("ERROR") || l.contains("Can not open") || l.contains("Cannot open") {
+            error_lines.push(l.clone());
+        }
+        if let Some(p) = parse_percent(&l) {
+            *percent = lo + (p.min(100) * (hi - lo)) / 100;
+        }
+        if let Some(f) = parse_file(&l) {
+            *last_file = Some(f);
+        }
+        if last_emit.elapsed() >= Duration::from_millis(120) || *percent >= 100 {
+            last_emit = Instant::now();
+            emit(
+                app,
+                TaskEvent {
+                    task_id,
+                    phase: "progress".into(),
+                    percent: Some(*percent),
+                    message: None,
+                    file: last_file.clone(),
+                },
+            );
+        }
+    }
+}
 
 pub fn spawn_task(
     app: &AppHandle,
     tasks: Arc<Mutex<HashMap<u32, TaskHandle>>>,
     task_id: u32,
-    mut cmd: Command,
+    cmd: Command,
 ) -> Result<(), String> {
-    let mut child = cmd.spawn().map_err(|e| format!("7z başlatılamadı: {e}"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    spawn_steps(app, tasks, task_id, vec![Step::single(cmd)], None)
+}
+
+pub fn spawn_piped_task(
+    app: &AppHandle,
+    tasks: Arc<Mutex<HashMap<u32, TaskHandle>>>,
+    task_id: u32,
+    outer: Command,
+    inner: Command,
+) -> Result<(), String> {
+    spawn_steps(app, tasks, task_id, vec![Step::piped(outer, inner)], None)
+}
+
+fn spawn_steps(
+    app: &AppHandle,
+    tasks: Arc<Mutex<HashMap<u32, TaskHandle>>>,
+    task_id: u32,
+    steps: Vec<Step>,
+    cleanup: Option<PathBuf>,
+) -> Result<(), String> {
     tasks.lock().unwrap().insert(
         task_id,
         TaskHandle {
-            child,
+            children: Vec::new(),
             cancelled: AtomicBool::new(false),
         },
     );
     let app2 = app.clone();
     std::thread::spawn(move || {
         let errs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let errs2 = errs.clone();
-        let stderr_thread = stderr.map(|e| {
-            std::thread::spawn(move || {
-                for line in BufReader::new(e).lines().map_while(Result::ok) {
-                    if !line.trim().is_empty() {
-                        errs2.lock().unwrap().push(line);
-                    }
-                }
-            })
-        });
         let mut percent: u32 = 0;
         let mut last_file: Option<String> = None;
         let mut error_lines: Vec<String> = Vec::new();
-        let mut last_emit = Instant::now() - Duration::from_secs(1);
-        if let Some(out) = stdout {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
-                let l: String = line
-                    .chars()
-                    .filter(|c| *c != '\r' && *c != '\u{8}')
-                    .collect();
-                if l.contains("ERROR") || l.contains("Can not open") || l.contains("Cannot open") {
-                    error_lines.push(l.clone());
-                }
-                if let Some(p) = parse_percent(&l) {
-                    percent = p;
-                }
-                if let Some(f) = parse_file(&l) {
-                    last_file = Some(f);
-                }
-                if last_emit.elapsed() >= Duration::from_millis(120) || percent >= 100 {
-                    last_emit = Instant::now();
-                    emit(
-                        &app2,
-                        TaskEvent {
+        let mut code: Option<i32> = None;
+        let mut ok = true;
+
+        for step in steps {
+            if is_cancelled(&tasks, task_id) {
+                ok = false;
+                break;
+            }
+            match step.kind {
+                StepKind::Single(mut cmd) => {
+                    let mut child = match cmd.spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error_lines.push(format!("7z başlatılamadı: {e}"));
+                            ok = false;
+                            break;
+                        }
+                    };
+                    let out = child.stdout.take();
+                    let err_thread = child
+                        .stderr
+                        .take()
+                        .map(|e| spawn_stderr_reader(e, errs.clone()));
+                    register_children(&tasks, task_id, vec![child]);
+                    if is_cancelled(&tasks, task_id) {
+                        for mut c in take_children(&tasks, task_id) {
+                            let _ = c.kill();
+                        }
+                        ok = false;
+                        break;
+                    }
+                    if let Some(out) = out {
+                        read_progress(
+                            &app2,
                             task_id,
-                            phase: "progress".into(),
-                            percent: Some(percent),
-                            message: None,
-                            file: last_file.clone(),
-                        },
-                    );
+                            out,
+                            step.lo,
+                            step.hi,
+                            &mut percent,
+                            &mut last_file,
+                            &mut error_lines,
+                        );
+                    }
+                    if let Some(t) = err_thread {
+                        let _ = t.join();
+                    }
+                    if let Some(mut c) = take_children(&tasks, task_id).pop() {
+                        if let Ok(st) = c.wait() {
+                            code = st.code();
+                            if !st.success() {
+                                ok = false;
+                            }
+                        }
+                    }
+                    if is_cancelled(&tasks, task_id) {
+                        ok = false;
+                        break;
+                    }
+                }
+                StepKind::Piped(mut outer, mut inner_cmd) => {
+                    let mut outer_child = match outer.spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error_lines.push(format!("7z başlatılamadı: {e}"));
+                            ok = false;
+                            break;
+                        }
+                    };
+                    let outer_out = match outer_child.stdout.take() {
+                        Some(o) => o,
+                        None => {
+                            error_lines.push("7z çıktısı alınamadı".to_string());
+                            let _ = outer_child.kill();
+                            ok = false;
+                            break;
+                        }
+                    };
+                    let outer_err_thread = outer_child
+                        .stderr
+                        .take()
+                        .map(|e| spawn_stderr_reader(e, errs.clone()));
+                    inner_cmd.stdin(Stdio::from(outer_out));
+                    let mut inner_child = match inner_cmd.spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error_lines.push(format!("7z başlatılamadı: {e}"));
+                            let _ = outer_child.kill();
+                            ok = false;
+                            break;
+                        }
+                    };
+                    let in_out = inner_child.stdout.take();
+                    let inner_err_thread = inner_child
+                        .stderr
+                        .take()
+                        .map(|e| spawn_stderr_reader(e, errs.clone()));
+                    register_children(&tasks, task_id, vec![inner_child, outer_child]);
+                    if is_cancelled(&tasks, task_id) {
+                        for mut c in take_children(&tasks, task_id) {
+                            let _ = c.kill();
+                        }
+                        ok = false;
+                        break;
+                    }
+                    if let Some(out) = in_out {
+                        read_progress(
+                            &app2,
+                            task_id,
+                            out,
+                            step.lo,
+                            step.hi,
+                            &mut percent,
+                            &mut last_file,
+                            &mut error_lines,
+                        );
+                    }
+                    if let Some(t) = outer_err_thread {
+                        let _ = t.join();
+                    }
+                    if let Some(t) = inner_err_thread {
+                        let _ = t.join();
+                    }
+                    let mut children = take_children(&tasks, task_id);
+                    if children.len() == 2 {
+                        let mut inner_child = children.remove(0);
+                        let mut outer_child = children.remove(0);
+                        if let Ok(st) = inner_child.wait() {
+                            code = st.code();
+                            if !st.success() {
+                                ok = false;
+                            }
+                        }
+                        let _ = outer_child.kill();
+                        let _ = outer_child.wait();
+                    }
+                    if is_cancelled(&tasks, task_id) {
+                        ok = false;
+                        break;
+                    }
                 }
             }
         }
-        if let Some(t) = stderr_thread {
-            let _ = t.join();
-        }
-        let handle = tasks.lock().unwrap().remove(&task_id);
-        let mut ok = false;
-        let mut code = None;
-        let mut cancelled = false;
-        if let Some(mut h) = handle {
-            cancelled = h.cancelled.load(Ordering::SeqCst);
-            if let Ok(st) = h.child.wait() {
-                ok = st.success();
-                code = st.code();
-            }
+
+        let was_cancelled = is_cancelled(&tasks, task_id);
+        tasks.lock().unwrap().remove(&task_id);
+        if let Some(dir) = cleanup {
+            let _ = std::fs::remove_dir_all(&dir);
         }
         for l in errs.lock().unwrap().iter() {
             error_lines.push(l.clone());
         }
-        if ok && !cancelled {
+        if ok && !was_cancelled {
             emit(
                 &app2,
                 TaskEvent {
@@ -367,7 +691,7 @@ pub fn spawn_task(
                 },
             );
         } else {
-            let msg = if cancelled {
+            let msg = if was_cancelled {
                 "İptal edildi".to_string()
             } else {
                 format_task_error(&error_lines, code)
@@ -399,13 +723,33 @@ pub fn extract_archive(
     overwrite: Option<&str>,
     entries: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let mut c = base_cmd(app)?;
-    c.arg("x").arg("-y").arg("-sccUTF-8").arg("-bsp1");
     let ow = match overwrite {
         Some("skip") => "-aos",
         Some("rename") => "-aou",
         _ => "-aoa",
     };
+    if compressed_tar(path) {
+        let outer = decompress_cmd(app, path)?;
+        let mut inner = base_cmd(app)?;
+        inner
+            .arg("x")
+            .arg("-y")
+            .arg("-sccUTF-8")
+            .arg("-bsp1")
+            .arg("-bb1")
+            .arg(ow)
+            .arg(format!("-o{dest}"))
+            .arg("-si")
+            .arg("-ttar");
+        if let Some(list) = entries {
+            for e in list {
+                inner.arg(e);
+            }
+        }
+        return spawn_piped_task(app, tasks, task_id, outer, inner);
+    }
+    let mut c = base_cmd(app)?;
+    c.arg("x").arg("-y").arg("-sccUTF-8").arg("-bsp1");
     c.arg(ow);
     if let Some(p) = password {
         if !p.is_empty() {
@@ -429,6 +773,19 @@ pub fn test_archive(
     path: &str,
     password: Option<&str>,
 ) -> Result<(), String> {
+    if compressed_tar(path) {
+        let outer = decompress_cmd(app, path)?;
+        let mut inner = base_cmd(app)?;
+        inner
+            .arg("t")
+            .arg("-y")
+            .arg("-sccUTF-8")
+            .arg("-bsp1")
+            .arg("-bb1")
+            .arg("-si")
+            .arg("-ttar");
+        return spawn_piped_task(app, tasks, task_id, outer, inner);
+    }
     let mut c = base_cmd(app)?;
     c.arg("t").arg("-y").arg("-sccUTF-8").arg("-bsp1");
     if let Some(p) = password {
@@ -442,7 +799,9 @@ pub fn test_archive(
 
 fn guess_format(output: &str) -> &'static str {
     let low = output.to_lowercase();
-    if low.ends_with(".7z") {
+    if low.ends_with(".tar.gz") || low.ends_with(".tgz") {
+        "tar.gz"
+    } else if low.ends_with(".7z") {
         "7z"
     } else if low.ends_with(".tar") {
         "tar"
@@ -505,6 +864,9 @@ pub fn create_archive(
     let mut c = base_cmd(app)?;
     c.arg("a").arg("-y").arg("-sccUTF-8").arg("-bsp1");
     let fmt = format.filter(|f| !f.is_empty()).unwrap_or_else(|| guess_format(output));
+    if fmt == "tar.gz" {
+        return create_tar_gz(app, tasks, task_id, output, sources, level);
+    }
     c.arg(format!("-t{fmt}"));
     if let Some(l) = level {
         if l > 0 {
@@ -536,6 +898,74 @@ pub fn create_archive(
         c.arg(a);
     }
     spawn_task(app, tasks, task_id, c)
+}
+
+/// Creates a tar.gz in two steps: 7z cannot produce combined archives in one
+/// command, so we pack a temporary .tar next to the output and gzip it.
+fn create_tar_gz(
+    app: &AppHandle,
+    tasks: Arc<Mutex<HashMap<u32, TaskHandle>>>,
+    task_id: u32,
+    output: &str,
+    sources: Vec<String>,
+    level: Option<u32>,
+) -> Result<(), String> {
+    let out_path = PathBuf::from(output);
+    let parent = match out_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let stem = out_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string());
+    let inner_name = if stem.to_ascii_lowercase().ends_with(".tar") {
+        stem
+    } else {
+        format!("{stem}.tar")
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = parent.join(format!(".zipforge-tmp-{stamp}"));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Geçici klasör oluşturulamadı: {e}"))?;
+    let tmp_tar = tmp_dir.join(&inner_name);
+
+    let mut s1 = base_cmd(app)?;
+    s1.arg("a")
+        .arg("-y")
+        .arg("-sccUTF-8")
+        .arg("-bsp1")
+        .arg("-ttar")
+        .arg("--")
+        .arg(&tmp_tar);
+    let (cwd, args) = relativize(&sources);
+    if let Some(dir) = cwd {
+        s1.current_dir(dir);
+    }
+    for a in args {
+        s1.arg(a);
+    }
+
+    let mut s2 = base_cmd(app)?;
+    s2.arg("a").arg("-y").arg("-sccUTF-8").arg("-bsp1").arg("-tgzip");
+    if let Some(l) = level {
+        if l > 0 {
+            s2.arg(format!("-mx{l}"));
+        }
+    }
+    s2.arg("--").arg(&out_path).arg(&tmp_tar);
+
+    let steps = vec![
+        Step::covered(s1, 0, 30),
+        Step::covered(s2, 30, 100),
+    ];
+    let res = spawn_steps(app, tasks, task_id, steps, Some(tmp_dir.clone()));
+    if res.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+    res
 }
 
 #[cfg(test)]
@@ -600,5 +1030,29 @@ Method = Store
         assert!(!l.entries[2].is_dir);
         assert_eq!(l.entries[2].name, "sub\\note.md");
         assert_eq!(l.entries[2].size, 14);
+    }
+
+    #[test]
+    fn detects_compressed_tar() {
+        assert!(compressed_tar("C:\\tmp\\a.tar.gz"));
+        assert!(compressed_tar("C:\\tmp\\A.TAR.GZ"));
+        assert!(compressed_tar("x.tgz"));
+        assert!(compressed_tar("x.tar.bz2"));
+        assert!(compressed_tar("x.TBZ2"));
+        assert!(compressed_tar("x.tar.xz"));
+        assert!(compressed_tar("x.tzst"));
+        assert!(!compressed_tar("x.tar"));
+        assert!(!compressed_tar("x.gz"));
+        assert!(!compressed_tar("x.zip"));
+        assert!(!compressed_tar("x.7z"));
+    }
+
+    #[test]
+    fn labels_tar_containers() {
+        assert_eq!(tar_container_label("a.tar.gz"), "tar.gz");
+        assert_eq!(tar_container_label("A.TGZ"), "tar.gz");
+        assert_eq!(tar_container_label("b.tar.bz2"), "tar.bz2");
+        assert_eq!(tar_container_label("c.tar.xz"), "tar.xz");
+        assert_eq!(tar_container_label("d.tar.zst"), "tar.zst");
     }
 }

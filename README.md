@@ -29,7 +29,7 @@
 
 - Open & browse archives without extracting, with instant search and sorting
 - Extract all or only the selected entries, with real-time progress and cancel
-- Create **zip / 7z / tar** archives with compression level selection
+- Create **zip / 7z / tar / tar.gz** archives with compression level selection
 - **AES-256** password protection (zip & 7z), encrypted-header option for 7z
 - **Split volumes** (e.g. 100 MB, 650 MB, 1 GB) for zip/7z
 - Password-protected archives: prompts once, works across extract/test
@@ -46,7 +46,8 @@
 | **7z** | ✅ (incl. header encryption) | ✅ |
 | **rar / rar5** | ✅ | — (proprietary format) |
 | **tar** | ✅ | ✅ |
-| **gz / tgz / bz2 / xz / zst** | ✅ | — (roadmap: tar.gz) |
+| **tar.gz / tgz** | ✅ (lists & extracts inner files) | ✅ |
+| **bz2 / xz / zst** | ✅ (incl. tar.bz2 / tar.xz / tar.zst) | — (roadmap) |
 | **iso, cab, jar, apk, war, lzma, lz, …** | ✅ | — |
 
 > Archive creation for `.rar` is not possible — RAR is a proprietary, licensed format. zipforge opens RAR archives, but creation is intentionally limited to open formats.
@@ -92,11 +93,12 @@ The release installer is written to `src-tauri/target/release/bundle/`.
 ## Roadmap
 
 - [x] Windows MVP: open zip/7z/rar/tar/gz/iso, create zip/7z/tar, passwords, split volumes, progress + cancel
+- [x] tar.gz support — list & extract inner files, one-step tar.gz creation (v0.2.0)
 - [ ] macOS support
 - [ ] Official installers + signed releases
 - [ ] File associations & Explorer context-menu integration
-- [ ] tar.gz / tar.xz creation
 - [ ] Auto-update
+- [ ] tar.xz / tar.zst creation
 
 ## License
 

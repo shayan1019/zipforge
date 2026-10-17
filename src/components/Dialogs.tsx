@@ -93,7 +93,7 @@ export function CreateDialog(props: {
 }) {
   const { open, t, onClose, onStart } = props;
   const [sources, setSources] = useState<string[]>([]);
-  const [format, setFormat] = useState<"zip" | "7z" | "tar">("zip");
+  const [format, setFormat] = useState<"zip" | "7z" | "tar" | "tar.gz">("zip");
   const [level, setLevel] = useState(5);
   const [password, setPassword] = useState("");
   const [showPw, setShowPw] = useState(false);
@@ -112,7 +112,7 @@ export function CreateDialog(props: {
     }
   }, [open]);
 
-  const ext = format === "tar" ? "tar" : format;
+  const ext = format;
 
   const pickFiles = async () => {
     const res = await openDialog({ multiple: true, title: t("addFiles") });
@@ -134,10 +134,10 @@ export function CreateDialog(props: {
     if (typeof res === "string") setOutput(res);
   };
 
-  const setFmt = (f: "zip" | "7z" | "tar") => {
+  const setFmt = (f: "zip" | "7z" | "tar" | "tar.gz") => {
     setFormat(f);
-    const ne = f === "tar" ? "tar" : f;
-    setOutput((o) => (o ? o.replace(/\.(zip|7z|tar)$/i, `.${ne}`) : o));
+    const ne = f;
+    setOutput((o) => (o ? o.replace(/\.(zip|7z|tar\.gz|tar)$/i, `.${ne}`) : o));
   };
 
   const canStart = sources.length > 0 && output.trim().length > 0;
@@ -145,12 +145,12 @@ export function CreateDialog(props: {
   const start = () => {
     let out = output.trim();
     if (!out) return;
-    if (!new RegExp(`\\.(zip|7z|tar)$`, "i").test(out)) out = `${out}.${ext}`;
+    if (!new RegExp(`\\.(zip|7z|tar\\.gz|tar)$`, "i").test(out)) out = `${out}.${ext}`;
     onStart(out, sources, {
       format,
       level,
-      password: password || undefined,
-      split: format !== "tar" && split ? split : undefined,
+      password: format === "tar.gz" ? undefined : password || undefined,
+      split: format !== "tar" && format !== "tar.gz" && split ? split : undefined,
     });
   };
 
@@ -208,7 +208,7 @@ export function CreateDialog(props: {
           <div>
             <div className="mb-1.5 text-xs font-medium text-zinc-500">{t("format")}</div>
             <div className="seg">
-              {(["zip", "7z", "tar"] as const).map((f) => (
+              {(["zip", "7z", "tar", "tar.gz"] as const).map((f) => (
                 <button key={f} className={`seg-item uppercase ${format === f ? "seg-item-active" : ""}`} onClick={() => setFmt(f)}>
                   {f}
                 </button>
@@ -255,7 +255,7 @@ export function CreateDialog(props: {
           </div>
           <div>
             <div className="mb-1.5 text-xs font-medium text-zinc-500">{t("split")}</div>
-            <select className="input" value={split} onChange={(e) => setSplit(e.target.value)} disabled={format === "tar"}>
+            <select className="input" value={split} onChange={(e) => setSplit(e.target.value)} disabled={format === "tar" || format === "tar.gz"}>
               <option value="">{t("splitNone")}</option>
               <option value="100m">100 MB</option>
               <option value="650m">650 MB</option>

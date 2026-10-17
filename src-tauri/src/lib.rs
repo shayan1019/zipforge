@@ -76,7 +76,9 @@ async fn cancel_task(tasks: State<'_, Tasks>, task_id: u32) -> Result<(), String
     let mut map = tasks.0.lock().unwrap();
     if let Some(h) = map.get_mut(&task_id) {
         h.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = h.child.kill();
+        for child in h.children.iter_mut() {
+            let _ = child.kill();
+        }
     }
     Ok(())
 }

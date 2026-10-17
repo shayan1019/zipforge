@@ -1,6 +1,6 @@
 [package]
 name = "zipforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast, modern archive manager for Windows (zip, 7z, rar, tar and more)"
 authors = ["shayan1019"]
 edition = "2024"
