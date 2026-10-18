@@ -53,6 +53,8 @@ The installer registers per-user shell entries (no admin rights needed, removed 
 > Windows 11: the entries live in the classic menu — press **Shift+F10** or choose **Show more options**.
 > Menu labels follow your Windows display language (Turkish / English).
 
+![zipforge in the Windows Explorer context menu](docs/explorer-menu.png)
+
 ## Supported formats
 
 | | Read | Write |
