@@ -13,19 +13,20 @@ export function ExtractDialog(props: {
   t: T;
   listing: Listing | null;
   selected: Set<string>;
+  initialDest?: string | null;
   onClose: () => void;
   onStart: (dest: string, overwrite: "overwrite" | "skip" | "rename", entries: string[]) => void;
 }) {
-  const { open, t, listing, selected, onClose, onStart } = props;
+  const { open, t, listing, selected, initialDest, onClose, onStart } = props;
   const [dest, setDest] = useState("");
   const [ow, setOw] = useState<"overwrite" | "skip" | "rename">("overwrite");
 
   useEffect(() => {
     if (open && listing) {
-      setDest(dirName(listing.info.path));
+      setDest(initialDest?.trim() || dirName(listing.info.path));
       setOw("overwrite");
     }
-  }, [open, listing]);
+  }, [open, listing, initialDest]);
 
   if (!listing) return null;
   const count = selected.size > 0 ? selected.size : listing.info.entries;
@@ -88,10 +89,11 @@ export function ExtractDialog(props: {
 export function CreateDialog(props: {
   open: boolean;
   t: T;
+  initialSources?: string[];
   onClose: () => void;
   onStart: (output: string, sources: string[], opts: CreateOpts) => void;
 }) {
-  const { open, t, onClose, onStart } = props;
+  const { open, t, initialSources, onClose, onStart } = props;
   const [sources, setSources] = useState<string[]>([]);
   const [format, setFormat] = useState<"zip" | "7z" | "tar" | "tar.gz">("zip");
   const [level, setLevel] = useState(5);
@@ -102,15 +104,16 @@ export function CreateDialog(props: {
 
   useEffect(() => {
     if (open) {
-      setSources([]);
-      setOutput("");
+      const init = initialSources ?? [];
+      setSources(init);
+      setOutput(init.length ? `${dirName(init[0])}\\${defaultOutputName(init[0], "zip")}` : "");
       setPassword("");
       setShowPw(false);
       setSplit("");
       setFormat("zip");
       setLevel(5);
     }
-  }, [open]);
+  }, [open, initialSources]);
 
   const ext = format;
 

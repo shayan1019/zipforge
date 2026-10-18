@@ -53,3 +53,18 @@ export function cancelTask(taskId: number): Promise<void> {
 export function onTask(cb: (e: TaskEvent) => void): Promise<() => void> {
   return listen<TaskEvent>("zf://task", (e) => cb(e.payload));
 }
+
+export interface StartupArgs {
+  open: string | null;
+  add: string[];
+  extract: string | null;
+  extractSub: string | null;
+}
+
+export function startupArgs(): Promise<StartupArgs> {
+  return invoke<StartupArgs>("startup_args");
+}
+
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}

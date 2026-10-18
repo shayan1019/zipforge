@@ -16,14 +16,17 @@ import ArchiveView from "./components/ArchiveView";
 import { CreateDialog, ExtractDialog, PasswordDialog } from "./components/Dialogs";
 import EmptyState from "./components/EmptyState";
 import {
+  appVersion,
   cancelTask,
   createArchive,
   extractArchive,
   listArchive,
   onTask,
+  startupArgs,
   testArchive,
   type CreateOpts,
 } from "./lib/api";
+import { dirName, stemName } from "./lib/format";
 import { useI18n } from "./lib/i18n";
 import type { Listing, TaskEvent } from "./types";
 
@@ -62,9 +65,13 @@ export default function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [pwFor, setPwFor] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [version, setVersion] = useState("");
+  const [initSources, setInitSources] = useState<string[] | null>(null);
+  const [extractDest, setExtractDest] = useState<string | null>(null);
 
   const taskRef = useRef<TaskState | null>(null);
   const nextId = useRef(Math.floor(Math.random() * 900000) + 100);
+  const pendingExtract = useRef<string | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -113,12 +120,55 @@ export default function App() {
       setPassword(pw ?? null);
       setSelected(new Set());
       setPwFor(null);
+      const pend = pendingExtract.current;
+      if (pend) {
+        pendingExtract.current = null;
+        setExtractDest(pend);
+        setExtractOpen(true);
+      }
     } catch (e) {
       const s = String(e);
-      if (!pw && s.includes("ENCRYPTED")) setPwFor(p);
-      else setToast({ ok: false, msg: s });
+      if (!pw && s.includes("ENCRYPTED")) {
+        setPwFor(p);
+      } else {
+        pendingExtract.current = null;
+        setToast({ ok: false, msg: s });
+      }
     }
   }, []);
+
+  // Explorer context-menu / command line entry points.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const v = await appVersion();
+        if (alive) setVersion(v);
+      } catch {
+        /* ignore */
+      }
+      try {
+        const a = await startupArgs();
+        if (!alive) return;
+        if (a.add.length) {
+          setInitSources(a.add);
+          setCreateOpen(true);
+        }
+        const target = a.extract ?? a.extractSub;
+        if (target) {
+          pendingExtract.current = a.extractSub ? `${dirName(target)}\\${stemName(target)}` : dirName(target);
+          void openPath(target);
+        } else if (a.open) {
+          void openPath(a.open);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [openPath]);
 
   const pickOpen = useCallback(async () => {
     try {
@@ -166,6 +216,7 @@ export default function App() {
     async (dest: string, overwrite: "overwrite" | "skip" | "rename", entries: string[]) => {
       if (!listing) return;
       setExtractOpen(false);
+      setExtractDest(null);
       const id = nextId.current++;
       setTask({ id, kind: "extract", label: t("extracting"), percent: 0, dest });
       try {
@@ -185,6 +236,7 @@ export default function App() {
   const startCreate = useCallback(
     async (output: string, sources: string[], opts: CreateOpts) => {
       setCreateOpen(false);
+      setInitSources(null);
       const id = nextId.current++;
       setTask({ id, kind: "create", label: t("creating"), percent: 0, dest: output });
       try {
@@ -275,7 +327,10 @@ export default function App() {
             </button>
           </>
         ) : (
-          <span className="text-zinc-400">{t("ready")} · v0.1.0</span>
+          <span className="text-zinc-400">
+            {t("ready")}
+            {version ? ` · v${version}` : ""}
+          </span>
         )}
       </footer>
 
@@ -284,11 +339,32 @@ export default function App() {
         t={t}
         listing={listing}
         selected={selected}
-        onClose={() => setExtractOpen(false)}
+        initialDest={extractDest}
+        onClose={() => {
+          setExtractOpen(false);
+          setExtractDest(null);
+        }}
         onStart={startExtract}
       />
-      <CreateDialog open={createOpen} t={t} onClose={() => setCreateOpen(false)} onStart={startCreate} />
-      <PasswordDialog open={!!pwFor} t={t} onClose={() => setPwFor(null)} onSubmit={(pw) => void openPath(pwFor as string, pw)} />
+      <CreateDialog
+        open={createOpen}
+        t={t}
+        initialSources={initSources ?? undefined}
+        onClose={() => {
+          setCreateOpen(false);
+          setInitSources(null);
+        }}
+        onStart={startCreate}
+      />
+      <PasswordDialog
+        open={!!pwFor}
+        t={t}
+        onClose={() => {
+          setPwFor(null);
+          pendingExtract.current = null;
+        }}
+        onSubmit={(pw) => void openPath(pwFor as string, pw)}
+      />
 
       {dragOver && (
         <div className="pointer-events-none fixed inset-3 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-indigo-400 bg-indigo-500/10 backdrop-blur-sm">

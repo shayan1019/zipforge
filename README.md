@@ -37,6 +37,21 @@
 - Drag & drop files straight onto the window
 - Dark / light theme (follows the system), TR / EN UI
 - Overwrite / skip / rename policies on extraction
+- **Explorer context menu** — create, open and extract archives straight from right-click (see below)
+
+## Explorer integration
+
+The installer registers per-user shell entries (no admin rights needed, removed cleanly on uninstall):
+
+| Right-click on | Menu entry | Result |
+|---|---|---|
+| Folder, file or folder background | **Add to zipforge archive** | Opens the Create dialog with the selection pre-filled |
+| An archive (zip, 7z, rar, tar.gz, iso, …) | **Open with zipforge** | Opens the archive in zipforge |
+| An archive | **Extract here** | Extracts directly into the archive's folder |
+| An archive | **Extract to folder** | Extracts into a new sub-folder named after the archive |
+
+> Windows 11: the entries live in the classic menu — press **Shift+F10** or choose **Show more options**.
+> Menu labels follow your Windows display language (Turkish / English).
 
 ## Supported formats
 
@@ -94,10 +109,10 @@ The release installer is written to `src-tauri/target/release/bundle/`.
 
 - [x] Windows MVP: open zip/7z/rar/tar/gz/iso, create zip/7z/tar, passwords, split volumes, progress + cancel
 - [x] tar.gz support — list & extract inner files, one-step tar.gz creation (v0.2.0)
+- [x] Explorer context menu — pack, open, extract-here, extract-to-folder (v0.3.0)
 - [ ] macOS support
-- [ ] Official installers + signed releases
-- [ ] File associations & Explorer context-menu integration
 - [ ] Auto-update
+- [ ] Code-signed builds (SmartScreen reputation)
 - [ ] tar.xz / tar.zst creation
 
 ## License

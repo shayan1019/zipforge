@@ -31,3 +31,9 @@ export function defaultOutputName(source: string | undefined, ext: string): stri
   const base = source ? baseName(source).replace(/\.[^.]+$/, "") : "archive";
   return `${base || "archive"}.${ext}`;
 }
+
+export function stemName(p: string): string {
+  return baseName(p)
+    .replace(/\.(tar\.(gz|bz2|xz|zst)|tgz|tbz2|txz|tzst)$/i, "")
+    .replace(/\.[^.]+$/, "");
+}
