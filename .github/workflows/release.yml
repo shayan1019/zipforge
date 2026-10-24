@@ -27,6 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # rust-cache restores earlier builds into src-tauri/target, so the bundle
+      # directories can already hold packages from a previous release. Remember
+      # when this run started and only trust newer artefacts.
+      - name: Build start marker
+        shell: bash
+        run: touch "$RUNNER_TEMP/zf-build-started"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -106,46 +113,6 @@ jobs:
           $out | Select-Object -First 1
           if (-not ($out -match "7-Zip 26.04")) { throw "bundled 7z.exe does not report 26.04" }
 
-      - name: Smoke-test the bundled engine (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          set -euo pipefail
-          work=$(mktemp -d)
-
-          # 1. the .deb keeps the engine's exec bit through dpkg packaging
-          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)
-          dpkg-deb -x "$deb" "$work/deb"
-          deb_engine="$work/deb/usr/lib/zipforge/resources/7z/7zz"
-          test -x "$deb_engine"
-          "$deb_engine" i | head -n1
-          "$deb_engine" i | grep -q "7-Zip 26.04"
-
-          # 2. the AppImage engine survives linuxdeploy/patchelf rewriting
-          appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -n1)
-          chmod +x "$appimage"
-          cd "$work"
-          "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
-          ai_engine="$work/squashfs-root/usr/lib/zipforge/resources/7z/7zz"
-          test -x "$ai_engine"
-          "$ai_engine" i | head -n1
-          "$ai_engine" i | grep -q "7-Zip 26.04"
-
-          # 3. and it can actually archive + extract, not just print a banner
-          mkdir -p "$work/data"
-          echo "zipforge ci" > "$work/data/probe.txt"
-          "$ai_engine" a -t7z "$work/probe.7z" "$work/data/probe.txt" >/dev/null
-          "$ai_engine" x -y "$work/probe.7z" "-o$work/out" >/dev/null
-          diff "$work/data/probe.txt" "$work/out/probe.txt"
-
-      - name: Smoke-test the bundled engine (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          set -euo pipefail
-          src=src-tauri/resources/7z/mac-universal/7zz
-          chmod +x "$src"
-          "$src" i | head -n1
-          app=$(ls -d src-tauri/target/release/bundle/macos/*.app | head -n1)
-          bundled="$app/Contents/Resources/resources/7z/7zz"
-          test -f "$bundled"
-          chmod +x "$bundled"
-          "$bundled" i | grep -q "7-Zip 26.04"
+      - name: Smoke-test the bundled engine (Linux/macOS)
+        if: matrix.platform != 'windows-latest'
+        run: bash scripts/smoke-engine.sh src-tauri/target "$RUNNER_TEMP/zf-build-started"
