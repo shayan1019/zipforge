@@ -204,6 +204,13 @@ fn parse_percent(l: &str) -> Option<u32> {
     digits.parse::<u32>().ok().filter(|p| *p <= 100)
 }
 
+/// Extracts the file name from a 7-Zip work line. 7-Zip prints the work line in
+/// two pieces separated by a `\r`:
+///   "  0%\r    \r+ data\f0.bin"
+/// so a token can be either `PERCENT [FILES]` or `SIGN NAME`:
+///   " 81% 37"
+///   "+ data\f0.bin"
+///   "- folder\other.bin"
 fn parse_file(l: &str) -> Option<String> {
     let t = l.trim();
     if let Some(rest) = t.strip_prefix("Extracting") {
@@ -212,22 +219,34 @@ fn parse_file(l: &str) -> Option<String> {
             return Some(n.to_string());
         }
     }
-    let idx = l.find('%')?;
-    let after = l[idx + 1..].trim();
-    if after.is_empty() {
-        return None;
+    // bare marker line: "+ name", "- name", "U name"
+    let mut head = t.chars();
+    if let Some('+' | '-' | 'U') = head.next() {
+        let rest = head.as_str();
+        if let Some(name) = rest.strip_prefix(' ') {
+            let name = name.trim();
+            if !name.is_empty() && !name.contains('%') {
+                return Some(name.to_string());
+            }
+        }
     }
-    let mut parts = after.splitn(3, ' ');
-    let _count = parts.next();
-    let sign = parts.next().unwrap_or("");
-    if !matches!(sign, "-" | "+" | "U") {
-        return None;
-    }
-    let name = parts.next().unwrap_or("").trim();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
+    let idx = t.rfind('%')?;
+    let after = t[idx + 1..].trim_start();
+    // skip the optional "N" file counter, then the gap before the marker
+    let after = after
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .trim_start();
+    let mut chars = after.chars();
+    match chars.next() {
+        Some('+' | '-' | 'U') => {
+            let name = chars.as_str().trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        }
+        _ => None,
     }
 }
 
@@ -561,21 +580,8 @@ fn read_progress(
     error_lines: &mut Vec<String>,
 ) {
     let mut last_emit = Instant::now() - Duration::from_secs(1);
-    for line in BufReader::new(out).lines().map_while(Result::ok) {
-        let l: String = line
-            .chars()
-            .filter(|c| *c != '\r' && *c != '\u{8}')
-            .collect();
-        if l.contains("ERROR") || l.contains("Can not open") || l.contains("Cannot open") {
-            error_lines.push(l.clone());
-        }
-        if let Some(p) = parse_percent(&l) {
-            *percent = lo + (p.min(100) * (hi - lo)) / 100;
-        }
-        if let Some(f) = parse_file(&l) {
-            *last_file = Some(f);
-        }
-        if last_emit.elapsed() >= Duration::from_millis(120) || *percent >= 100 {
+    let mut emit_if_due = |app: &AppHandle, percent: &u32, file: &Option<String>, force: bool| {
+        if force || last_emit.elapsed() >= Duration::from_millis(120) || *percent >= 100 {
             last_emit = Instant::now();
             emit(
                 app,
@@ -584,10 +590,86 @@ fn read_progress(
                     phase: "progress".into(),
                     percent: Some(*percent),
                     message: None,
-                    file: last_file.clone(),
+                    file: file.clone(),
                 },
             );
         }
+    };
+
+    // 7-Zip paints its console updates with `\r` (same line, overwritten) and
+    // only ends a line with `\n` when a file is finished. Reading with
+    // `BufRead::lines` therefore hides every intermediate update: while one big
+    // file is being compressed the reader blocks until that file completes,
+    // which is why the window sat at 0 % for the whole operation. Split on both
+    // characters so each repaint becomes a progress event.
+    let mut reader = BufReader::new(out);
+    let mut chunk = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::with_capacity(8192);
+    // Bytes below this index were already inspected and contained no separator.
+    let mut scanned = 0usize;
+
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        pending.extend_from_slice(&chunk[..n]);
+
+        let mut start = 0usize;
+        let mut i = scanned;
+        while i < pending.len() {
+            if pending[i] == b'\r' || pending[i] == b'\n' {
+                if i > start {
+                    handle_progress_token(&pending[start..i], lo, hi, percent, last_file, error_lines);
+                    emit_if_due(app, percent, last_file, false);
+                }
+                start = i + 1;
+            }
+            i += 1;
+        }
+        pending.drain(..start);
+        scanned = pending.len();
+
+        // A pathological line without separators must not grow without bound.
+        if pending.len() > 1 << 20 {
+            handle_progress_token(&pending, lo, hi, percent, last_file, error_lines);
+            pending.clear();
+            scanned = 0;
+        }
+    }
+
+    // whatever is left has no trailing separator
+    if !pending.is_empty() {
+        handle_progress_token(&pending, lo, hi, percent, last_file, error_lines);
+    }
+    emit_if_due(app, percent, last_file, true);
+}
+
+/// Interprets one `\r`/`\n`-delimited chunk of 7-Zip console output.
+fn handle_progress_token(
+    token: &[u8],
+    lo: u32,
+    hi: u32,
+    percent: &mut u32,
+    last_file: &mut Option<String>,
+    error_lines: &mut Vec<String>,
+) {
+    let text = String::from_utf8_lossy(token);
+    let l: String = text.chars().filter(|c| *c != '\u{8}').collect();
+    let l = l.trim();
+    if l.is_empty() {
+        return;
+    }
+    if l.contains("ERROR") || l.contains("Can not open") || l.contains("Cannot open") {
+        error_lines.push(l.to_string());
+    }
+    if let Some(p) = parse_percent(l) {
+        *percent = lo + (p.min(100) * (hi - lo)) / 100;
+    }
+    if let Some(f) = parse_file(l) {
+        *last_file = Some(f);
     }
 }
 
@@ -851,7 +933,9 @@ pub fn extract_archive(
         return spawn_piped_task(app, tasks, task_id, outer, inner);
     }
     let mut c = base_cmd(app)?;
-    c.arg("x").arg("-y").arg("-sccUTF-8").arg("-bsp1");
+    // `-bb1` makes 7-Zip name every finished file; without it the console only
+    // repaints the percentage line and the status bar stays anonymous.
+    c.arg("x").arg("-y").arg("-sccUTF-8").arg("-bsp1").arg("-bb1");
     c.arg(ow);
     if let Some(p) = password {
         if !p.is_empty() {
@@ -889,7 +973,7 @@ pub fn test_archive(
         return spawn_piped_task(app, tasks, task_id, outer, inner);
     }
     let mut c = base_cmd(app)?;
-    c.arg("t").arg("-y").arg("-sccUTF-8").arg("-bsp1");
+    c.arg("t").arg("-y").arg("-sccUTF-8").arg("-bsp1").arg("-bb1");
     if let Some(p) = password {
         if !p.is_empty() {
             c.arg(format!("-p{p}"));
@@ -964,7 +1048,9 @@ pub fn create_archive(
         return Err("Kaynak seçilmedi".into());
     }
     let mut c = base_cmd(app)?;
-    c.arg("a").arg("-y").arg("-sccUTF-8").arg("-bsp1");
+    // `-bb1` is what turns the single repainted percentage line into a stream
+    // of `PERCENT [N] + name` lines, so the window can show live progress.
+    c.arg("a").arg("-y").arg("-sccUTF-8").arg("-bsp1").arg("-bb1");
     let fmt = format.filter(|f| !f.is_empty()).unwrap_or_else(|| guess_format(output));
     if fmt == "tar.gz" {
         return create_tar_gz(app, tasks, task_id, output, sources, level);
@@ -1039,6 +1125,7 @@ fn create_tar_gz(
         .arg("-y")
         .arg("-sccUTF-8")
         .arg("-bsp1")
+        .arg("-bb1")
         .arg("-ttar")
         .arg("--")
         .arg(&tmp_tar);
@@ -1051,7 +1138,12 @@ fn create_tar_gz(
     }
 
     let mut s2 = base_cmd(app)?;
-    s2.arg("a").arg("-y").arg("-sccUTF-8").arg("-bsp1").arg("-tgzip");
+    s2.arg("a")
+        .arg("-y")
+        .arg("-sccUTF-8")
+        .arg("-bsp1")
+        .arg("-bb1")
+        .arg("-tgzip");
     if let Some(l) = level {
         if l > 0 {
             s2.arg(format!("-mx{l}"));
@@ -1201,5 +1293,82 @@ Characteristics = A
         assert_eq!(tar_container_label("b.tar.bz2"), "tar.bz2");
         assert_eq!(tar_container_label("c.tar.xz"), "tar.xz");
         assert_eq!(tar_container_label("d.tar.zst"), "tar.zst");
+    }
+
+    #[test]
+    fn parses_percent_from_work_lines() {
+        assert_eq!(parse_percent("  0%"), Some(0));
+        assert_eq!(parse_percent("  0%    + data\\f0.bin"), Some(0));
+        assert_eq!(parse_percent(" 81% 37  + data\\f7.bin"), Some(81));
+        assert_eq!(parse_percent("100%"), Some(100));
+        assert_eq!(parse_percent("1 folder, 40 files"), None);
+    }
+
+    #[test]
+    fn parses_file_from_work_lines() {
+        // real 7-Zip splits the work line on `\r`: percent first, then the marker
+        assert_eq!(parse_file("+ data\\f0.bin").as_deref(), Some("data\\f0.bin"));
+        assert_eq!(
+            parse_file("- folder\\other.bin").as_deref(),
+            Some("folder\\other.bin")
+        );
+        // no counter yet: "  0%     + data\f0.bin"
+        assert_eq!(
+            parse_file("  0%     + data\\f0.bin").as_deref(),
+            Some("data\\f0.bin")
+        );
+        // counter present: " 81% 37  + data\f7.bin"
+        assert_eq!(
+            parse_file(" 81% 37  + data\\f7.bin").as_deref(),
+            Some("data\\f7.bin")
+        );
+        // deleting/updating entries
+        assert_eq!(
+            parse_file(" 45% 3   - folder\\other.bin").as_deref(),
+            Some("folder\\other.bin")
+        );
+        assert_eq!(
+            parse_file(" 45% 3   U folder\\other.bin").as_deref(),
+            Some("folder\\other.bin")
+        );
+        // percentage only, nothing to name
+        assert_eq!(parse_file("  0%"), None);
+        assert_eq!(parse_file("  0% 1"), None);
+        assert_eq!(parse_file(" 81% 39"), None);
+        // extract style line
+        assert_eq!(
+            parse_file("Extracting  sub\\note.md").as_deref(),
+            Some("sub\\note.md")
+        );
+    }
+
+    #[test]
+    fn folds_tokens_into_progress() {
+        let mut percent = 0u32;
+        let mut file = None;
+        let mut errors: Vec<String> = Vec::new();
+        for token in [
+            b"  0%     + data\\f0.bin".as_slice(),
+            b"  0% 1\r".as_slice(),
+            b" 81% 37  + data\\f7.bin".as_slice(),
+            b" 81% 38".as_slice(),
+            b"ERROR: Can not open file".as_slice(),
+        ] {
+            handle_progress_token(token, 0, 100, &mut percent, &mut file, &mut errors);
+        }
+        assert_eq!(percent, 81);
+        assert_eq!(file.as_deref(), Some("data\\f7.bin"));
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn maps_percent_into_step_range() {
+        let mut percent = 0u32;
+        let mut file = None;
+        let mut errors: Vec<String> = Vec::new();
+        handle_progress_token(b" 50% 1  + a.bin", 30, 100, &mut percent, &mut file, &mut errors);
+        assert_eq!(percent, 65);
+        handle_progress_token(b"100%", 30, 100, &mut percent, &mut file, &mut errors);
+        assert_eq!(percent, 100);
     }
 }
