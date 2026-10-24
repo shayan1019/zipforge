@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Fast, modern archive manager",
+    "longDescription": "Open, create and extract zip, 7z, rar, tar, gz, iso, cab and jar archives with a fast native UI.",
     "windows": {
       "nsis": {
         "installerHooks": "./nsis/hooks.nsh"
