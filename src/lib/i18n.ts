@@ -66,6 +66,7 @@ const T: Record<Lang, Record<string, string>> = {
     theme: "Tema",
     language: "Dil",
     close: "Kapat",
+    opening: "Arşiv okunuyor…",
   },
   en: {
     appTagline: "modern archive manager",
@@ -130,6 +131,7 @@ const T: Record<Lang, Record<string, string>> = {
     theme: "Theme",
     language: "Language",
     close: "Close",
+    opening: "Reading archive…",
   },
 };
 

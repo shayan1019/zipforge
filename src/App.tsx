@@ -7,6 +7,7 @@ import {
   Boxes,
   CheckCircle2,
   FolderOpen,
+  Loader2,
   Moon,
   Plus,
   Sun,
@@ -21,12 +22,15 @@ import {
   createArchive,
   extractArchive,
   listArchive,
+  onStartupArgs,
   onTask,
   startupArgs,
+  takePendingArgs,
   testArchive,
   type CreateOpts,
+  type StartupArgs,
 } from "./lib/api";
-import { dirName, stemName } from "./lib/format";
+import { dirName, joinPath, stemName, baseName } from "./lib/format";
 import { useI18n } from "./lib/i18n";
 import type { Listing, TaskEvent } from "./types";
 
@@ -68,10 +72,13 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [initSources, setInitSources] = useState<string[] | null>(null);
   const [extractDest, setExtractDest] = useState<string | null>(null);
+  const [opening, setOpening] = useState<string | null>(null);
+  const [openMs, setOpenMs] = useState(0);
 
   const taskRef = useRef<TaskState | null>(null);
   const nextId = useRef(Math.floor(Math.random() * 900000) + 100);
   const pendingExtract = useRef<string | null>(null);
+  const openSeq = useRef(0);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -114,8 +121,12 @@ export default function App() {
   }, [t]);
 
   const openPath = useCallback(async (p: string, pw?: string) => {
+    const seq = ++openSeq.current;
+    setOpening(p);
+    setOpenMs(0);
     try {
       const l = await listArchive(p, pw);
+      if (seq !== openSeq.current) return;
       setListing(l);
       setPassword(pw ?? null);
       setSelected(new Set());
@@ -127,6 +138,7 @@ export default function App() {
         setExtractOpen(true);
       }
     } catch (e) {
+      if (seq !== openSeq.current) return;
       const s = String(e);
       if (!pw && s.includes("ENCRYPTED")) {
         setPwFor(p);
@@ -134,12 +146,46 @@ export default function App() {
         pendingExtract.current = null;
         setToast({ ok: false, msg: s });
       }
+    } finally {
+      if (seq === openSeq.current) setOpening(null);
     }
   }, []);
 
-  // Explorer context-menu / command line entry points.
+  // Elapsed time next to the spinner: a 60k-entry archive needs a few seconds
+  // before the first row exists, and silence reads as a freeze.
+  useEffect(() => {
+    if (!opening) return;
+    const t0 = performance.now();
+    const h = setInterval(() => setOpenMs(performance.now() - t0), 250);
+    return () => clearInterval(h);
+  }, [opening]);
+
+  // Explorer context-menu / command line entry points. A multi-selection uses
+  // the shell's "Player" model, so every selected item arrives as its own
+  // process; the Rust side funnels them into this instance and we merge them
+  // into a single Create dialog.
+  const handleStartup = useCallback(
+    (a: StartupArgs) => {
+      if (a.add.length) {
+        setInitSources((prev) => [...new Set([...(prev ?? []), ...a.add])]);
+        setCreateOpen(true);
+      }
+      const target = a.extract ?? a.extractSub;
+      if (target) {
+        pendingExtract.current = a.extractSub ? joinPath(dirName(target), stemName(target)) : dirName(target);
+        void openPath(target);
+      } else if (a.open) {
+        void openPath(a.open);
+      }
+    },
+    [openPath],
+  );
+
   useEffect(() => {
     let alive = true;
+    const un = onStartupArgs((a) => {
+      if (alive) handleStartup(a);
+    });
     void (async () => {
       try {
         const v = await appVersion();
@@ -147,28 +193,26 @@ export default function App() {
       } catch {
         /* ignore */
       }
+      // Drain the forwarded queue after the listener is live so launches that
+      // happened while the webview was still booting are not lost.
       try {
-        const a = await startupArgs();
-        if (!alive) return;
-        if (a.add.length) {
-          setInitSources(a.add);
-          setCreateOpen(true);
-        }
-        const target = a.extract ?? a.extractSub;
-        if (target) {
-          pendingExtract.current = a.extractSub ? `${dirName(target)}\\${stemName(target)}` : dirName(target);
-          void openPath(target);
-        } else if (a.open) {
-          void openPath(a.open);
-        }
+        const own = await startupArgs();
+        if (alive) handleStartup(own);
+      } catch {
+        /* ignore */
+      }
+      try {
+        const pending = await takePendingArgs();
+        if (alive) pending.forEach(handleStartup);
       } catch {
         /* ignore */
       }
     })();
     return () => {
       alive = false;
+      void un.then((f) => f());
     };
-  }, [openPath]);
+  }, [handleStartup]);
 
   const pickOpen = useCallback(async () => {
     try {
@@ -291,7 +335,7 @@ export default function App() {
         </button>
       </header>
 
-      <main className="min-h-0 flex-1 px-5 pb-2 pt-4">
+      <main className="relative min-h-0 flex-1 px-5 pb-2 pt-4">
         {listing ? (
           <ArchiveView
             t={t}
@@ -305,6 +349,19 @@ export default function App() {
           />
         ) : (
           <EmptyState t={t} onOpen={pickOpen} onCreate={() => setCreateOpen(true)} />
+        )}
+        {opening && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-zinc-50/80 backdrop-blur-sm dark:bg-zinc-950/80">
+            <div className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+              <Loader2 size={18} className="animate-spin text-indigo-500" />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{t("opening")}</div>
+                <div className="max-w-xs truncate text-xs text-zinc-400">
+                  {baseName(opening)} · {(openMs / 1000).toFixed(1)}s
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </main>
 

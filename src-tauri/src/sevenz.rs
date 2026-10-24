@@ -71,23 +71,71 @@ pub struct TaskEvent {
     pub file: Option<String>,
 }
 
-pub fn seven_zip(app: &AppHandle) -> Result<PathBuf, String> {
-    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("resources")
-        .join("7z")
-        .join("7z.exe");
-    if dev.exists() {
-        return Ok(dev);
+/// Bundled 7-Zip console binary: `7z.exe` on Windows, `7zz` on Linux/macOS.
+pub const SEVEN_ZIP_BIN: &str = if cfg!(windows) { "7z.exe" } else { "7zz" };
+
+/// Returns a path to a runnable 7-Zip binary.
+///
+/// On Unix the bundled copy is often not executable: installers such as `.deb`
+/// drop resources as root-owned 0644 and macOS app bundles keep whatever bit
+/// the zip carried. `chmod` fails there, so fall back to a private copy under
+/// the user cache directory and mark that one 0755.
+#[cfg(unix)]
+fn runnable(src: &std::path::Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(src).map_err(|e| e.to_string())?.permissions().mode();
+    if mode & 0o111 == 0o111 {
+        return Ok(src.to_path_buf());
     }
-    if let Ok(res) = app
-        .path()
-        .resolve("resources/7z/7z.exe", tauri::path::BaseDirectory::Resource)
-    {
-        if res.exists() {
-            return Ok(res);
+    if std::fs::set_permissions(src, std::fs::Permissions::from_mode(mode | 0o111)).is_ok() {
+        return Ok(src.to_path_buf());
+    }
+
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or_else(|| "Önbellek dizini bulunamadı".to_string())?
+        .join("zipforge");
+    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let dst = cache.join(SEVEN_ZIP_BIN);
+    let same = matches!(
+        (std::fs::metadata(src), std::fs::metadata(&dst)),
+        (Ok(a), Ok(b)) if a.len() == b.len()
+    );
+    if !same {
+        std::fs::copy(src, &dst).map_err(|e| format!("Arşiv motoru kopyalanamadı: {e}"))?;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(dst)
+}
+
+#[cfg(not(unix))]
+fn runnable(src: &std::path::Path) -> Result<PathBuf, String> {
+    Ok(src.to_path_buf())
+}
+
+pub fn seven_zip(app: &AppHandle) -> Result<PathBuf, String> {
+    // Dev checkout first (any per-platform folder), then the bundled resource.
+    let dev_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("7z");
+    for sub in ["", "win", "linux-x64", "mac-universal"] {
+        let p = if sub.is_empty() { dev_root.join(SEVEN_ZIP_BIN) } else { dev_root.join(sub).join(SEVEN_ZIP_BIN) };
+        if p.exists() {
+            return runnable(&p);
         }
     }
-    Err("7z.exe bulunamadi".into())
+    if let Ok(res) = app.path().resolve(
+        format!("resources/7z/{SEVEN_ZIP_BIN}"),
+        tauri::path::BaseDirectory::Resource,
+    ) {
+        if res.exists() {
+            return runnable(&res);
+        }
+    }
+    Err(format!(
+        "Arşiv motoru bulunamadı ({SEVEN_ZIP_BIN}). Uygulamayı yeniden kurun."
+    ))
 }
 
 fn base_cmd(app: &AppHandle) -> Result<Command, String> {
@@ -244,72 +292,118 @@ pub fn list_archive(app: &AppHandle, path: &str, password: Option<&str>) -> Resu
     parse_slt(path, &stdout)
 }
 
-fn parse_slt(path: &str, out: &str) -> Result<Listing, String> {
-    let mut groups: Vec<HashMap<String, String>> = Vec::new();
-    let mut cur: HashMap<String, String> = HashMap::new();
-    let flush = |cur: &mut HashMap<String, String>, groups: &mut Vec<HashMap<String, String>>| {
-        if !cur.is_empty() {
-            groups.push(std::mem::take(cur));
+#[derive(Default)]
+struct Draft {
+    path: Option<String>,
+    size: u64,
+    packed_size: u64,
+    modified: String,
+    crc: String,
+    attributes: String,
+    encrypted: bool,
+    is_dir: bool,
+    method: String,
+    has_type: bool,
+    type_name: String,
+    physical_size: u64,
+    meta_encrypted: bool,
+}
+
+impl Draft {
+    fn flush(&mut self, meta: &mut Option<ArchiveMeta>, entries: &mut Vec<Entry>) {
+        if let Some(name) = self.path.take() {
+            if !meta.is_some() && self.has_type {
+                *meta = Some(ArchiveMeta {
+                    format: std::mem::take(&mut self.type_name),
+                    physical_size: self.physical_size,
+                    encrypted: self.meta_encrypted,
+                });
+            } else {
+                entries.push(Entry {
+                    name,
+                    size: self.size,
+                    packed_size: self.packed_size,
+                    modified: std::mem::take(&mut self.modified),
+                    crc: std::mem::take(&mut self.crc),
+                    attributes: std::mem::take(&mut self.attributes),
+                    encrypted: self.encrypted,
+                    is_dir: self.is_dir,
+                    method: std::mem::take(&mut self.method),
+                });
+            }
         }
-    };
-    for line in out.lines() {
-        if line.trim().is_empty() || (line.starts_with("---") && line.trim_end().chars().all(|ch| ch == '-')) {
-            flush(&mut cur, &mut groups);
+        *self = Draft::default();
+    }
+}
+
+struct ArchiveMeta {
+    format: String,
+    physical_size: u64,
+    encrypted: bool,
+}
+
+/// Parses `7z l -slt` output in a single pass. Each entry used to cost a
+/// HashMap plus ~12 key strings; large archives (50k+ entries) spent most of
+/// their listing time in the allocator.
+fn parse_slt(path: &str, out: &str) -> Result<Listing, String> {
+    let mut meta: Option<ArchiveMeta> = None;
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut d = Draft::default();
+
+    for raw in out.lines() {
+        let line = raw.trim_end();
+        if line.is_empty()
+            || (line.starts_with("---") && line.chars().all(|c| c == '-'))
+        {
+            d.flush(&mut meta, &mut entries);
             continue;
         }
-        if let Some((k, v)) = line.split_once(" = ") {
-            cur.insert(k.trim().to_string(), v.to_string());
+        let Some((k, v)) = line.split_once(" = ") else {
+            continue;
+        };
+        match k.trim() {
+            "Path" => d.path = Some(v.to_string()),
+            "Size" => d.size = parse_size(v),
+            "Packed Size" => d.packed_size = parse_size(v),
+            "Modified" => d.modified = v.to_string(),
+            "CRC" => d.crc = v.to_string(),
+            "Attributes" => {
+                d.attributes = v.to_string();
+                d.is_dir = d.attributes.starts_with('D');
+            }
+            "Folder" => {
+                if v == "+" {
+                    d.is_dir = true;
+                }
+            }
+            "Encrypted" => {
+                let on = v == "+" || v == "1";
+                d.encrypted = on;
+                d.meta_encrypted = on;
+            }
+            "Method" => d.method = v.to_string(),
+            "Type" => {
+                d.has_type = true;
+                d.type_name = v.to_string();
+            }
+            "Physical Size" => d.physical_size = parse_size(v),
+            _ => {}
         }
     }
-    flush(&mut cur, &mut groups);
-    if groups.is_empty() {
-        return Err("Arşiv içeriği okunamadı".into());
-    }
-    let meta_idx = groups
-        .iter()
-        .position(|g| g.contains_key("Type"))
-        .unwrap_or(0);
-    let meta = &groups[meta_idx];
+    d.flush(&mut meta, &mut entries);
+
+    let meta = meta.ok_or_else(|| "Arşiv içeriği okunamadı".to_string())?;
     let name = PathBuf::from(path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string());
-    let entries: Vec<Entry> = groups
-        .iter()
-        .skip(meta_idx + 1)
-        .filter_map(|g| {
-            let name = g.get("Path")?.clone();
-            let attrs = g.get("Attributes").cloned().unwrap_or_default();
-            let is_dir = attrs.starts_with('D')
-                || g.get("Folder").map(|v| v == "+").unwrap_or(false);
-            let encrypted = g
-                .get("Encrypted")
-                .map(|v| v == "+" || v == "1")
-                .unwrap_or(false);
-            Some(Entry {
-                name,
-                size: parse_size(g.get("Size").map(String::as_str).unwrap_or("0")),
-                packed_size: parse_size(g.get("Packed Size").map(String::as_str).unwrap_or("0")),
-                modified: g.get("Modified").cloned().unwrap_or_default(),
-                crc: g.get("CRC").cloned().unwrap_or_default(),
-                attributes: attrs,
-                encrypted,
-                is_dir,
-                method: g.get("Method").cloned().unwrap_or_default(),
-            })
-        })
-        .collect();
     let info = ArchiveInfo {
         path: path.to_string(),
         name,
-        format: meta.get("Type").cloned().unwrap_or_default(),
-        physical_size: parse_size(meta.get("Physical Size").map(String::as_str).unwrap_or("0")),
+        format: meta.format,
+        physical_size: meta.physical_size,
         entries: entries.len() as u64,
-        encrypted: entries.iter().any(|e| e.encrypted)
-            || meta
-                .get("Encrypted")
-                .map(|v| v == "+")
-                .unwrap_or(false),
+        encrypted: meta.encrypted || entries.iter().any(|e| e.encrypted),
     };
     Ok(Listing { info, entries })
 }

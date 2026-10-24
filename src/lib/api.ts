@@ -65,6 +65,15 @@ export function startupArgs(): Promise<StartupArgs> {
   return invoke<StartupArgs>("startup_args");
 }
 
+/** Arguments forwarded by a second Explorer launch while this instance runs. */
+export function takePendingArgs(): Promise<StartupArgs[]> {
+  return invoke<StartupArgs[]>("take_pending_args");
+}
+
+export function onStartupArgs(cb: (a: StartupArgs) => void): Promise<() => void> {
+  return listen<StartupArgs>("zf://startup", (e) => cb(e.payload));
+}
+
 export function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "resources": {
+      "resources/7z/linux-x64/7zz": "resources/7z/7zz",
+      "resources/7z/License-posix.txt": "resources/7z/License.txt"
+    }
+  }
+}

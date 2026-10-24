@@ -6,9 +6,18 @@
 
 !include LogicLib.nsh
 
-!macro zfVerb ROOT VERB LABEL ARGS
+; MSM = MultiSelectModel (Shell verb selection model).
+;   Player -> the shell starts one process per selected item, each with its own
+;             "%1". zipforge funnels those launches into the running window
+;             (tauri-plugin-single-instance) and merges them into one Create
+;             dialog. Without this value the verb is hidden entirely as soon as
+;             more than one folder is selected.
+;   Single -> verb only appears for a single item. Archive verbs act on "%1"
+;             only, so showing them for a 5-file selection would be a lie.
+!macro zfVerb ROOT VERB LABEL ARGS MSM
 WriteRegStr HKCU "Software\Classes\${ROOT}\shell\${VERB}" "" "${LABEL}"
 WriteRegStr HKCU "Software\Classes\${ROOT}\shell\${VERB}" "Icon" "$INSTDIR\zipforge.exe,0"
+WriteRegStr HKCU "Software\Classes\${ROOT}\shell\${VERB}" "MultiSelectModel" "${MSM}"
 WriteRegStr HKCU "Software\Classes\${ROOT}\shell\${VERB}\command" "" '"$INSTDIR\zipforge.exe" ${ARGS}'
 !macroend
 
@@ -17,9 +26,9 @@ DeleteRegKey HKCU "Software\Classes\${ROOT}\shell\${VERB}"
 !macroend
 
 !macro zfArchive EXT
-!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeOpen" $R2 '"%1"'
-!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeExtractHere" $R3 '--extract "%1"'
-!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeExtractTo" $R4 '--extract-sub "%1"'
+!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeOpen" $R2 '"%1"' "Single"
+!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeExtractHere" $R3 '--extract "%1"' "Single"
+!insertmacro zfVerb "SystemFileAssociations\.${EXT}" "ZipforgeExtractTo" $R4 '--extract-sub "%1"' "Single"
 !macroend
 
 !macro zfArchiveDel EXT
@@ -43,9 +52,9 @@ StrCpy $R4 "zipforge ile klasöre çıkart"
 ${EndIf}
 
 ; Folder / file / background "add to archive"
-!insertmacro zfVerb "Directory" "ZipforgeAdd" $R1 '--add "%1"'
-!insertmacro zfVerb "Directory\Background" "ZipforgeAdd" $R1 '--add "%V"'
-!insertmacro zfVerb "*" "ZipforgeAdd" $R1 '--add "%1"'
+!insertmacro zfVerb "Directory" "ZipforgeAdd" $R1 '--add "%1"' "Player"
+!insertmacro zfVerb "Directory\Background" "ZipforgeAdd" $R1 '--add "%V"' "Player"
+!insertmacro zfVerb "*" "ZipforgeAdd" $R1 '--add "%1"' "Player"
 
 ; Archive file verbs
 !insertmacro zfArchive "zip"

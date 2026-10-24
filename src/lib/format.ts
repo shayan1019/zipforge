@@ -27,6 +27,12 @@ export function dirName(p: string): string {
   return parts.join(sep) || sep;
 }
 
+/** Joins a directory and a name using the separator that matches the platform path style. */
+export function joinPath(dir: string, name: string): string {
+  const sep = /^[A-Za-z]:[\\/]/.test(dir) || dir.startsWith("\\\\") ? "\\" : "/";
+  return `${dir.replace(/[\\/]+$/, "")}${sep}${name}`;
+}
+
 export function defaultOutputName(source: string | undefined, ext: string): string {
   const base = source ? baseName(source).replace(/\.[^.]+$/, "") : "archive";
   return `${base || "archive"}.${ext}`;

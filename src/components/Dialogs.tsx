@@ -3,7 +3,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { Eye, EyeOff, FilePlus, FolderPlus, X } from "lucide-react";
 import Modal from "./Modal";
 import type { CreateOpts } from "../lib/api";
-import { baseName, defaultOutputName, dirName } from "../lib/format";
+import { baseName, defaultOutputName, dirName, joinPath } from "../lib/format";
 import type { Listing } from "../types";
 
 type T = (k: string, vars?: Record<string, string | number>) => string;
@@ -103,16 +103,24 @@ export function CreateDialog(props: {
   const [output, setOutput] = useState("");
 
   useEffect(() => {
-    if (open) {
-      const init = initialSources ?? [];
-      setSources(init);
-      setOutput(init.length ? `${dirName(init[0])}\\${defaultOutputName(init[0], "zip")}` : "");
-      setPassword("");
-      setShowPw(false);
-      setSplit("");
-      setFormat("zip");
-      setLevel(5);
-    }
+    if (!open) return;
+    setSources([]);
+    setOutput("");
+    setPassword("");
+    setShowPw(false);
+    setSplit("");
+    setFormat("zip");
+    setLevel(5);
+  }, [open]);
+
+  // Sources can arrive in several waves: Explorer's multi-selection launches one
+  // process per item and the Rust side forwards each argv to this window.
+  useEffect(() => {
+    if (!open) return;
+    const init = initialSources ?? [];
+    if (!init.length) return;
+    setSources((prev) => [...new Set([...prev, ...init])]);
+    setOutput((prev) => prev || joinPath(dirName(init[0]), defaultOutputName(init[0], "zip")));
   }, [open, initialSources]);
 
   const ext = format;

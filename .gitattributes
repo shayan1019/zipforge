@@ -1,0 +1,12 @@
+# Keep packaged archive-engine binaries byte-identical: never apply EOL
+# conversion or diff heuristics to them.
+*.exe binary
+*.dll binary
+*.icns binary
+*.ico binary
+*.png binary
+src-tauri/resources/7z/linux-x64/7zz binary
+src-tauri/resources/7z/mac-universal/7zz binary
+
+# Shell entrypoints must keep LF, otherwise the shebang breaks on Linux/macOS CI.
+*.sh text eol=lf

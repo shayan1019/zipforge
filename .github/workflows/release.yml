@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
+
+      # WebKitGTK 4.1 ships on Ubuntu 22.04+, which is what the binary targets.
+      - name: Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev
+
+      - run: npm ci
+
+      # The 7-Zip engine is not committed (see .gitignore); every platform
+      # fetches the pinned build before bundling.
+      - name: Fetch 7-Zip engine (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/fetch-7z.ps1
+
+      - name: Fetch 7-Zip engine (Linux/macOS)
+        if: matrix.platform != 'windows-latest'
+        run: bash scripts/fetch-7z.sh
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: zipforge ${{ github.ref_name }}
+          releaseBody: |
+            zipforge ${{ github.ref_name }}
+
+            | Platform | Installer |
+            | --- | --- |
+            | Windows 10/11 x64 | `.exe` (NSIS) or `.msi` |
+            | Linux x64 | `.AppImage` (portable) or `.deb` |
+            | macOS 10.15+ (Intel + Apple Silicon) | `.dmg` (universal) |
+
+            The macOS build is signed ad-hoc and not notarized (no Apple Developer
+            account yet), so Gatekeeper needs a one-time confirmation:
+            right-click the app -> Open, or run
+            `xattr -dr com.apple.quarantine /Applications/zipforge.app`.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

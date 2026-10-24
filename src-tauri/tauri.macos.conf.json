@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "resources": {
+      "resources/7z/mac-universal/7zz": "resources/7z/7zz",
+      "resources/7z/License-posix.txt": "resources/7z/License.txt"
+    },
+    "category": "Utility",
+    "shortDescription": "Fast, modern archive manager",
+    "longDescription": "Open, create and extract zip, 7z, rar, tar, gz, iso, cab and jar archives with a fast native UI.",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-",
+      "dmg": {
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 190 },
+        "applicationFolderPosition": { "x": 480, "y": 190 }
+      }
+    }
+  }
+}
