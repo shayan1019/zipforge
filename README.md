@@ -116,11 +116,12 @@ xattr -dr com.apple.quarantine /Applications/zipforge.app
 git clone https://github.com/shayan1019/zipforge.git
 cd zipforge
 
-# 1. Fetch the bundled 7-Zip engine (LGPL) into the app resources
-#    Windows — copies from a local 7-Zip install (winget install 7zip.7zip):
-powershell -ExecutionPolicy Bypass -File scripts/fetch-7z.ps1
-#    Linux / macOS — downloads the pinned 26.04 build and verifies its SHA-256:
-bash scripts/fetch-7z.sh
+# 1. Fetch the bundled 7-Zip engine (LGPL) into the app resources.
+#    Both scripts download the pinned 26.04 build from the official GitHub
+#    release mirror and verify its SHA-256. The Windows script additionally
+#    needs a local 7-Zip to unpack the official installer (winget install 7zip.7zip).
+powershell -ExecutionPolicy Bypass -File scripts/fetch-7z.ps1   # Windows
+bash scripts/fetch-7z.sh                                        # Linux / macOS
 
 # 2. Install frontend dependencies
 npm install
@@ -144,9 +145,12 @@ Releases are built by `.github/workflows/release.yml` on a tag push (`v*`): a
 three-OS matrix (windows-latest / ubuntu-22.04 / macos-latest, macOS universal)
 uploads the installers to a **draft** GitHub release, which is then published by hand.
 
-Per-platform bundling config lives in `src-tauri/tauri.conf.json` (base, Windows) plus
-`tauri.linux.conf.json` / `tauri.macos.conf.json`, which only add the engine binary and
-target list for that OS.
+`src-tauri/tauri.conf.json` holds the platform-neutral base. Each OS adds its own
+file — `tauri.windows.conf.json`, `tauri.linux.conf.json`, `tauri.macos.conf.json` —
+which supplies the engine resources and target list for that platform. They are
+merged with RFC 7386 JSON Merge Patch, so the base deliberately carries no
+`resources` entry: a map there would be unioned into every platform instead of
+being replaced.
 
 ## Tech stack
 
