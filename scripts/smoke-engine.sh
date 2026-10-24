@@ -47,9 +47,21 @@ engine_smoke() {
     echo "engine is not executable inside the package: $engine" >&2
     exit 1
   fi
-  out="$("$engine" i | sed -n 1p)"
-  echo "$out"
-  printf '%s\n' "$out" | grep -c "7-Zip 26.04" >/dev/null
+
+  # `7zz i` starts with a blank line on Unix and with the banner on Windows, so
+  # never look at line 1 only. The match is done with `case` instead of
+  # `... | grep -m1`: grep would exit early and the engine would die of SIGPIPE,
+  # which pipefail turns into a spurious failure.
+  out="$("$engine" i)"
+  case "$out" in
+    *"7-Zip 26.04"*) ;;
+    *)
+      echo "engine does not report 7-Zip 26.04. First lines:" >&2
+      printf '%s\n' "$out" | sed -n '1,3p' >&2
+      exit 1
+      ;;
+  esac
+  printf '%s\n' "$out" | sed -n '/7-Zip/p'
   echo "$label engine ok"
 }
 
