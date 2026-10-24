@@ -27,12 +27,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": {
-      "resources/7z/7z.exe": "resources/7z/7z.exe",
-      "resources/7z/7z.dll": "resources/7z/7z.dll",
-      "resources/7z/License.txt": "resources/7z/License.txt",
-      "resources/7z/readme.txt": "resources/7z/readme.txt"
-    },
     "windows": {
       "nsis": {
         "installerHooks": "./nsis/hooks.nsh"

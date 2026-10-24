@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/7z/7z.exe": "resources/7z/7z.exe",
+      "resources/7z/7z.dll": "resources/7z/7z.dll",
+      "resources/7z/License.txt": "resources/7z/License.txt",
+      "resources/7z/readme.txt": "resources/7z/readme.txt"
+    }
+  }
+}
