@@ -48,13 +48,16 @@ engine_smoke() {
     exit 1
   fi
 
-  # `7zz i` starts with a blank line on Unix and with the banner on Windows, so
-  # never look at line 1 only. The match is done with `case` instead of
-  # `... | grep -m1`: grep would exit early and the engine would die of SIGPIPE,
-  # which pipefail turns into a spurious failure.
+  # The banner differs between the two builds we ship:
+  #   Windows 7z.exe  ->  "7-Zip 26.04 (x64) : Copyright ..."
+  #   Unix 7zz        ->  "7-Zip (z) 26.04 (x64) : Copyright ..."
+  # so match either spelling. `7zz i` also starts with a blank line on Unix,
+  # hence the whole output is inspected rather than line 1. `case` is used
+  # instead of `... | grep -m1`: grep would exit early and the engine would die
+  # of SIGPIPE, which pipefail turns into a spurious failure.
   out="$("$engine" i)"
   case "$out" in
-    *"7-Zip 26.04"*) ;;
+    *"7-Zip 26.04"* | *"7-Zip (z) 26.04"*) ;;
     *)
       echo "engine does not report 7-Zip 26.04. First lines:" >&2
       printf '%s\n' "$out" | sed -n '1,3p' >&2
