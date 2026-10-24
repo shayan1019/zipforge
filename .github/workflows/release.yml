@@ -81,10 +81,71 @@ jobs:
             | Linux x64 | `.AppImage` (portable) or `.deb` |
             | macOS 10.15+ (Intel + Apple Silicon) | `.dmg` (universal) |
 
+            The bundled 7-Zip 26.04 engine is part of the package, so no separate
+            7-Zip installation is needed.
+
             The macOS build is signed ad-hoc and not notarized (no Apple Developer
             account yet), so Gatekeeper needs a one-time confirmation:
             right-click the app -> Open, or run
             `xattr -dr com.apple.quarantine /Applications/zipforge.app`.
+
+            Auto-update is not included in this release.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Prove that the engine inside the shipped packages really runs on this
+      # OS. The Linux step matters most: the AppImage bundler rewrites every ELF
+      # it finds in usr/lib with patchelf, so a damaged 7zz would otherwise only
+      # show up on a user's machine.
+      - name: Smoke-test the bundled engine (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $out = & src-tauri/resources/7z/7z.exe i
+          $out | Select-Object -First 1
+          if (-not ($out -match "7-Zip 26.04")) { throw "bundled 7z.exe does not report 26.04" }
+
+      - name: Smoke-test the bundled engine (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+
+          # 1. the .deb keeps the engine's exec bit through dpkg packaging
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)
+          dpkg-deb -x "$deb" "$work/deb"
+          deb_engine="$work/deb/usr/lib/zipforge/resources/7z/7zz"
+          test -x "$deb_engine"
+          "$deb_engine" i | head -n1
+          "$deb_engine" i | grep -q "7-Zip 26.04"
+
+          # 2. the AppImage engine survives linuxdeploy/patchelf rewriting
+          appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -n1)
+          chmod +x "$appimage"
+          cd "$work"
+          "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          ai_engine="$work/squashfs-root/usr/lib/zipforge/resources/7z/7zz"
+          test -x "$ai_engine"
+          "$ai_engine" i | head -n1
+          "$ai_engine" i | grep -q "7-Zip 26.04"
+
+          # 3. and it can actually archive + extract, not just print a banner
+          mkdir -p "$work/data"
+          echo "zipforge ci" > "$work/data/probe.txt"
+          "$ai_engine" a -t7z "$work/probe.7z" "$work/data/probe.txt" >/dev/null
+          "$ai_engine" x -y "$work/probe.7z" "-o$work/out" >/dev/null
+          diff "$work/data/probe.txt" "$work/out/probe.txt"
+
+      - name: Smoke-test the bundled engine (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          set -euo pipefail
+          src=src-tauri/resources/7z/mac-universal/7zz
+          chmod +x "$src"
+          "$src" i | head -n1
+          app=$(ls -d src-tauri/target/release/bundle/macos/*.app | head -n1)
+          bundled="$app/Contents/Resources/resources/7z/7zz"
+          test -f "$bundled"
+          chmod +x "$bundled"
+          "$bundled" i | grep -q "7-Zip 26.04"

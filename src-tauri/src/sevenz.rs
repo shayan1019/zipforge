@@ -311,14 +311,18 @@ struct Draft {
 
 impl Draft {
     fn flush(&mut self, meta: &mut Option<ArchiveMeta>, entries: &mut Vec<Entry>) {
-        if let Some(name) = self.path.take() {
-            if !meta.is_some() && self.has_type {
-                *meta = Some(ArchiveMeta {
-                    format: std::mem::take(&mut self.type_name),
-                    physical_size: self.physical_size,
-                    encrypted: self.meta_encrypted,
-                });
-            } else {
+        // The archive header is the block carrying `Type`. It cannot be found by
+        // looking at `Path`: when the archive is read from stdin (`7z l -si`,
+        // used for tar.gz/tgz) the header has no name at all, so `Path` is
+        // either empty or missing.
+        if meta.is_none() && self.has_type {
+            *meta = Some(ArchiveMeta {
+                format: std::mem::take(&mut self.type_name),
+                physical_size: self.physical_size,
+                encrypted: self.meta_encrypted,
+            });
+        } else if let Some(name) = self.path.take() {
+            if !name.is_empty() {
                 entries.push(Entry {
                     name,
                     size: self.size,
@@ -358,9 +362,13 @@ fn parse_slt(path: &str, out: &str) -> Result<Listing, String> {
             d.flush(&mut meta, &mut entries);
             continue;
         }
-        let Some((k, v)) = line.split_once(" = ") else {
+        // Split on the first '=' instead of " = ": a header read from stdin has
+        // an empty `Path`, and 7-Zip writes that as "Path =" with nothing after
+        // the separator, so a " = " split would silently drop the field.
+        let Some((k, v)) = line.split_once('=') else {
             continue;
         };
+        let v = v.trim();
         match k.trim() {
             "Path" => d.path = Some(v.to_string()),
             "Size" => d.size = parse_size(v),
@@ -1124,6 +1132,51 @@ Method = Store
         assert!(!l.entries[2].is_dir);
         assert_eq!(l.entries[2].name, "sub\\note.md");
         assert_eq!(l.entries[2].size, 14);
+    }
+
+    /// Captured from `7z l -si -ttar -slt`, the pipeline used for tar.gz/tgz.
+    /// The header has no file name (`Path =` is empty), so it must be detected
+    /// by its `Type` field — looking at `Path` rejected the whole listing.
+    const PIPED_TAR: &str = r#"
+7-Zip 26.04 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-10-05
+
+
+Listing archive: 
+
+--
+Path = 
+Type = tar
+Code Page = UTF-8
+Characteristics = ASCII
+
+----------
+Path = folder1
+Folder = +
+Size = 0
+Packed Size = 0
+Modified = 2026-10-24 13:26:52
+Mode = drwxrwxrwx
+Characteristics = 5 GNU ASCII
+
+Path = folder1/a.txt
+Folder = -
+Size = 12
+Packed Size = 12
+Modified = 2026-10-24 13:26:52
+Mode = -rw-rw-rw-
+Characteristics = A
+"#;
+
+    #[test]
+    fn parses_piped_tar_listing() {
+        let l = parse_slt("C:\\tmp\\test.tar.gz", PIPED_TAR).unwrap();
+        assert_eq!(l.info.format, "tar");
+        assert_eq!(l.entries.len(), 2);
+        assert_eq!(l.entries[0].name, "folder1");
+        assert!(l.entries[0].is_dir);
+        assert_eq!(l.entries[1].name, "folder1/a.txt");
+        assert_eq!(l.entries[1].size, 12);
+        assert!(!l.entries[1].is_dir);
     }
 
     #[test]
