@@ -181,6 +181,10 @@ export default function App() {
     [openPath],
   );
 
+  // The dialog merges the incoming paths into its own state; dropping them here
+  // keeps a later "New Archive" click from resurrecting the previous selection.
+  const clearInitSources = useCallback(() => setInitSources(null), []);
+
   useEffect(() => {
     let alive = true;
     const un = onStartupArgs((a) => {
@@ -407,6 +411,7 @@ export default function App() {
         open={createOpen}
         t={t}
         initialSources={initSources ?? undefined}
+        onSourcesConsumed={clearInitSources}
         onClose={() => {
           setCreateOpen(false);
           setInitSources(null);

@@ -90,10 +90,14 @@ export function CreateDialog(props: {
   open: boolean;
   t: T;
   initialSources?: string[];
+  /** Called once the incoming sources are merged, so the parent can drop them.
+   *  Without this the same paths are merged again on every reopen and old
+   *  selections keep piling up in a fresh dialog. */
+  onSourcesConsumed?: () => void;
   onClose: () => void;
   onStart: (output: string, sources: string[], opts: CreateOpts) => void;
 }) {
-  const { open, t, initialSources, onClose, onStart } = props;
+  const { open, t, initialSources, onSourcesConsumed, onClose, onStart } = props;
   const [sources, setSources] = useState<string[]>([]);
   const [format, setFormat] = useState<"zip" | "7z" | "tar" | "tar.gz">("zip");
   const [level, setLevel] = useState(5);
@@ -121,7 +125,8 @@ export function CreateDialog(props: {
     if (!init.length) return;
     setSources((prev) => [...new Set([...prev, ...init])]);
     setOutput((prev) => prev || joinPath(dirName(init[0]), defaultOutputName(init[0], "zip")));
-  }, [open, initialSources]);
+    onSourcesConsumed?.();
+  }, [open, initialSources, onSourcesConsumed]);
 
   const ext = format;
 
